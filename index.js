@@ -1,7 +1,10 @@
 // Host half of the dsh-opencode-go-usage plugin.
 // Publishes the "opencodeUsage" Cordis service (a Typert Remote) with three
 // methods callable from the browser over the /api RPC carrier:
-//   usage()                 — the official quota windows (5h / weekly / monthly)
+//   usage()                 — the official quota windows (5h / weekly / monthly),
+//                             plus fetch freshness (fetchedAt / httpStatus), the
+//                             parse version, credential provenance, and a bounded
+//                             ring of raw request snapshots for diagnostics
 //   dshUsage()              — per-session token usage from DeepSeek Harness
 //                             session persistence (sessions on opencode-go)
 //   dshSessionMessages(id)  — per-step (per model call) usage of one session
@@ -24,6 +27,14 @@ const DEFAULT_DANGER_PERCENT = 85;
 const MAX_SESSIONS = 30;
 const MAX_STEPS_PER_SESSION = 400;
 const READ_CONCURRENCY = 4;
+// Version of the usage-response parsing logic. Bump whenever pickWindow or
+// the response-shape handling changes, so diagnostics can tell "our parser
+// changed" apart from "the endpoint changed".
+const PARSE_VERSION = 1;
+// How many raw fetch-attempt snapshots to keep in memory for diagnostics.
+const SNAPSHOT_LIMIT = 3;
+// Serialized bytes after which a snapshot body is truncated to a preview.
+const SNAPSHOT_BODY_MAX = 4000;
 
 export const Config = z.object({
   baseUrl: z.string().default(DEFAULT_BASE_URL),
@@ -79,37 +90,75 @@ async function resolveCredentialRefName(ctx) {
 }
 
 /**
- * Resolve the OpenCode Go API key, most-trusted first:
+ * Resolve the OpenCode Go API key together with its provenance, most-trusted
+ * first:
  *   1. The credential reference the opencode-go provider profile declares
  *      (covers $DSH_HOME/.credentials.yaml and the process environment)
  *   2. The conventional DSH credentials / env reference OPENCODE_GO_API_KEY
  *   3. OpenCode's own auth.json: opencode-go (fallback opencode) type=api key
+ * Returns `{ key, source }` or undefined; `source` names the store the key
+ * came from so the diagnostics view can show it (masked) to the user and
+ * multi-key mix-ups can be spotted.
  */
 async function resolveApiKey(ctx) {
   try {
     const refName = await resolveCredentialRefName(ctx);
     const cred = await ctx.credentials.resolve(credentialRef(refName));
-    if (cred && cred.value) return cred.value;
+    if (cred && cred.value) return { key: String(cred.value), source: "provider:" + refName };
   } catch {
     /* fall through */
   }
   try {
     const cred = await ctx.credentials.resolve(credentialRef(DEFAULT_CREDENTIAL_REF));
-    if (cred && cred.value) return cred.value;
+    if (cred && cred.value) return { key: String(cred.value), source: "credential:" + DEFAULT_CREDENTIAL_REF };
   } catch {
     /* fall through */
   }
   try {
     const authPath = join(homedir(), ".local", "share", "opencode", "auth.json");
     const raw = JSON.parse(await readFile(authPath, "utf8"));
-    const entry = raw["opencode-go"] ?? raw["opencode"];
-    if (entry && entry.type === "api" && typeof entry.key === "string" && entry.key.length > 0) {
-      return entry.key;
+    for (const name of ["opencode-go", "opencode"]) {
+      const entry = raw[name];
+      if (entry && entry.type === "api" && typeof entry.key === "string" && entry.key.length > 0) {
+        return { key: entry.key, source: "auth:" + name };
+      }
     }
   } catch {
     /* fall through */
   }
   return undefined;
+}
+
+/** Mask a credential for display: first 4 chars + ellipsis + last 4. */
+function maskKey(key) {
+  if (typeof key !== "string" || key.length === 0) return null;
+  if (key.length <= 8) return "***";
+  return key.slice(0, 4) + "…" + key.slice(-4);
+}
+
+/**
+ * Shrink a parsed response body for the in-memory snapshot ring. Bodies are
+ * tiny in practice; when one exceeds SNAPSHOT_BODY_MAX serialized bytes, a
+ * truncated preview is kept instead so diagnostics stay bounded.
+ */
+function snapshotBody(body) {
+  if (body === undefined || body === null) return null;
+  try {
+    const text = JSON.stringify(body);
+    if (text.length <= SNAPSHOT_BODY_MAX) return body;
+    return { truncated: true, preview: text.slice(0, SNAPSHOT_BODY_MAX) };
+  } catch {
+    return null;
+  }
+}
+
+/** Best-effort JSON read of a response body; null when it is not JSON. */
+async function tryJson(res) {
+  try {
+    return await res.json();
+  } catch {
+    return null;
+  }
 }
 
 function pickWindow(w) {
@@ -252,6 +301,14 @@ export class OpencodeUsageGateway extends TypertRemoteService {
   constructor(ctx, config) {
     super(ctx, "opencodeUsage");
     this.config = config ?? {};
+    this.snapshots = [];
+  }
+
+  /** Push one fetch-attempt snapshot into the bounded in-memory ring. */
+  recordSnapshot(snapshot) {
+    if (!Array.isArray(this.snapshots)) this.snapshots = [];
+    this.snapshots.push(snapshot);
+    if (this.snapshots.length > SNAPSHOT_LIMIT) this.snapshots = this.snapshots.slice(-SNAPSHOT_LIMIT);
   }
 
   async usage() {
@@ -270,14 +327,26 @@ export class OpencodeUsageGateway extends TypertRemoteService {
       configured = false;
     }
     if (!configured) {
-      return { configured: false, reason: "not-in-models", error: null, usage: null, thresholds: null, limits: null };
+      return {
+        configured: false, reason: "not-in-models", error: null,
+        fetchedAt: null, httpStatus: null, parseVersion: PARSE_VERSION,
+        credential: null, snapshots: [],
+        usage: null, thresholds: null, limits: null,
+      };
     }
 
-    const apiKey = await resolveApiKey(this.ctx);
+    const resolved = await resolveApiKey(this.ctx);
+    const apiKey = resolved ? resolved.key : undefined;
     if (!apiKey) {
-      return { configured: false, reason: "no-api-key", error: null, usage: null, thresholds: null, limits: null };
+      return {
+        configured: false, reason: "no-api-key", error: null,
+        fetchedAt: null, httpStatus: null, parseVersion: PARSE_VERSION,
+        credential: null, snapshots: [],
+        usage: null, thresholds: null, limits: null,
+      };
     }
 
+    const attemptAt = Date.now();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     let res;
@@ -287,30 +356,61 @@ export class OpencodeUsageGateway extends TypertRemoteService {
         signal: controller.signal,
       });
     } catch {
-      return { configured: true, reason: null, error: "network", usage: null, thresholds: null, limits: null };
+      this.recordSnapshot({ attemptAt, httpStatus: null, parseVersion: PARSE_VERSION, error: "network", body: null });
+      return {
+        configured: true, reason: null, error: "network",
+        fetchedAt: attemptAt, httpStatus: null, parseVersion: PARSE_VERSION,
+        credential: null, snapshots: this.snapshots.slice(),
+        usage: null, thresholds: null, limits: null,
+      };
     } finally {
       clearTimeout(timer);
     }
 
     if (res.status === 401) {
-      return { configured: true, reason: null, error: "unauthorized", usage: null, thresholds: null, limits: null };
+      this.recordSnapshot({ attemptAt, httpStatus: res.status, parseVersion: PARSE_VERSION, error: "unauthorized", body: await tryJson(res) });
+      return {
+        configured: true, reason: null, error: "unauthorized",
+        fetchedAt: attemptAt, httpStatus: res.status, parseVersion: PARSE_VERSION,
+        credential: null, snapshots: this.snapshots.slice(),
+        usage: null, thresholds: null, limits: null,
+      };
     }
     if (!res.ok) {
-      return { configured: true, reason: null, error: `http-${res.status}`, usage: null, thresholds: null, limits: null };
+      this.recordSnapshot({ attemptAt, httpStatus: res.status, parseVersion: PARSE_VERSION, error: `http-${res.status}`, body: await tryJson(res) });
+      return {
+        configured: true, reason: null, error: `http-${res.status}`,
+        fetchedAt: attemptAt, httpStatus: res.status, parseVersion: PARSE_VERSION,
+        credential: null, snapshots: this.snapshots.slice(),
+        usage: null, thresholds: null, limits: null,
+      };
     }
 
     let body;
     try {
       body = await res.json();
     } catch {
-      return { configured: true, reason: null, error: "bad-json", usage: null, thresholds: null, limits: null };
+      this.recordSnapshot({ attemptAt, httpStatus: res.status, parseVersion: PARSE_VERSION, error: "bad-json", body: null });
+      return {
+        configured: true, reason: null, error: "bad-json",
+        fetchedAt: attemptAt, httpStatus: res.status, parseVersion: PARSE_VERSION,
+        credential: null, snapshots: this.snapshots.slice(),
+        usage: null, thresholds: null, limits: null,
+      };
     }
 
     const usage = body && typeof body === "object" && body.usage ? body.usage : body;
+    const credential = { source: resolved.source, keyHint: maskKey(apiKey) };
+    this.recordSnapshot({ attemptAt, httpStatus: res.status, parseVersion: PARSE_VERSION, error: null, body: snapshotBody(body) });
     return {
       configured: true,
       reason: null,
       error: null,
+      fetchedAt: attemptAt,
+      httpStatus: res.status,
+      parseVersion: PARSE_VERSION,
+      credential,
+      snapshots: this.snapshots.slice(),
       usage: {
         rolling: pickWindow(usage && usage.rolling),
         weekly: pickWindow(usage && usage.weekly),
@@ -347,6 +447,7 @@ export class OpencodeUsageGateway extends TypertRemoteService {
         ok: false,
         error: "list-failed",
         message: "读取 DSH 会话列表失败：" + String(error && error.message ? error.message : error),
+        fetchedAt: null,
         scanned: 0,
         totals: null,
         sessions: [],
@@ -394,6 +495,7 @@ export class OpencodeUsageGateway extends TypertRemoteService {
       ok: true,
       error: null,
       message: null,
+      fetchedAt: Date.now(),
       scanned: sorted.length,
       totals: sessions.length > 0 ? totals : null,
       sessions,

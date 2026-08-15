@@ -61,6 +61,19 @@ window.__ModuleLoader__.load({
       dshStepTotal: "共 {n} 次调用",
       dshStepRow: "第 {turn} 轮 · 第 {step} 步",
       dshStepCapped: "仅显示最近 400 次调用",
+      lastUpdate: "最近成功更新",
+      stale: "未更新",
+      statsAt: "统计时间",
+      disclaimer: "本地统计仅供参考：日志 token 与服务端计费之间可能存在差异（计费规则、舍入、重试、隐藏 token 等），以官方账单为准。",
+      limitsRef: "限额为套餐参考值，可能与实际套餐不同。",
+      diagShow: "诊断",
+      diagHide: "收起诊断",
+      diagFetchedAt: "最近成功拉取",
+      diagHttp: "HTTP 状态",
+      diagParse: "解析版本",
+      diagCredSource: "凭证来源",
+      diagSnapshots: "最近请求快照",
+      diagNone: "暂无快照",
       dockNotConfigured: "OpenCode Go 未配置",
       dockFailed: "OpenCode Go 查询失败",
       dockReset: "重置",
@@ -111,6 +124,19 @@ window.__ModuleLoader__.load({
       dshStepTotal: "{n} calls",
       dshStepRow: "Turn {turn} · Step {step}",
       dshStepCapped: "Showing the latest 400 calls only",
+      lastUpdate: "Last successful update",
+      stale: "stale",
+      statsAt: "Stats at",
+      disclaimer: "Local stats are for reference only: logged tokens may differ from actual billing (billing rules, rounding, retries, hidden tokens, etc.). The official bill is authoritative.",
+      limitsRef: "Limits are reference plan values and may differ from your current plan.",
+      diagShow: "Diagnostics",
+      diagHide: "Hide diagnostics",
+      diagFetchedAt: "Last successful fetch",
+      diagHttp: "HTTP status",
+      diagParse: "Parse version",
+      diagCredSource: "Credential source",
+      diagSnapshots: "Recent request snapshots",
+      diagNone: "No snapshots yet",
       dockNotConfigured: "OpenCode Go not configured",
       dockFailed: "OpenCode Go query failed",
       dockReset: "resets",
@@ -213,6 +239,8 @@ window.__ModuleLoader__.load({
       mono: { fontVariantNumeric: "tabular-nums" },
       stepList: { display: "flex", flexDirection: "column", gap: 2, maxHeight: 320, overflowY: "auto" },
       stepRow: { display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap", fontSize: 12, color: colors.text2, padding: "3px 0" },
+      pre: { margin: "4px 0 0", padding: "8px", background: "var(--dsw-alias-bg-layer-1)", borderRadius: 6, overflow: "auto", maxHeight: 240, fontSize: 11, color: colors.text2 },
+      diagSummary: { cursor: "pointer", fontSize: 12, color: colors.text2 },
       dockWrap: { display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: colors.text2, padding: "0 2px" },
       dot: { width: 7, height: 7, borderRadius: 999, background: colors.muted, flexShrink: 0 },
       chips: { display: "flex", flexWrap: "wrap", gap: 6 },
@@ -287,6 +315,25 @@ window.__ModuleLoader__.load({
       }
     }
 
+    function fmtTimeMs(ms) {
+      if (typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0) return "";
+      try {
+        const d = new Date(ms);
+        if (Number.isNaN(d.getTime())) return "";
+        return d.toLocaleString();
+      } catch (e) {
+        return "";
+      }
+    }
+
+    function safeJson(value) {
+      try {
+        return JSON.stringify(value, null, 2);
+      } catch (e) {
+        return String(value);
+      }
+    }
+
     function emptyTotals() {
       return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 };
     }
@@ -326,7 +373,8 @@ window.__ModuleLoader__.load({
     }
 
     function QuotaView(props) {
-      const { value, t, load } = props;
+      const { value, t, load, stale } = props;
+      const [diagOpen, setDiagOpen] = React.useState(false);
       if (value.configured !== true) {
         const msg = value.reason === "no-api-key" ? t("noApiKey") : t("notInModels");
         return React.createElement("div", { style: styles.wrap },
@@ -347,11 +395,40 @@ window.__ModuleLoader__.load({
       }
       const usage = value.usage || {};
       const limits = value.limits || LIMITS;
+      const snapshots = Array.isArray(value.snapshots) ? value.snapshots : [];
+      const cred = value.credential && typeof value.credential === "object" ? value.credential : null;
+      const staleBadge = stale ? " · " + t("stale") : "";
       return React.createElement("div", { style: styles.wrap },
         React.createElement("h2", { style: styles.title }, t("title")),
         React.createElement(WindowCard, { name: t("rolling"), limit: limits.rolling, windowData: usage.rolling, thresholds: value.thresholds, t }),
         React.createElement(WindowCard, { name: t("weekly"), limit: limits.weekly, windowData: usage.weekly, thresholds: value.thresholds, t }),
         React.createElement(WindowCard, { name: t("monthly"), limit: limits.monthly, windowData: usage.monthly, thresholds: value.thresholds, t }),
+        React.createElement("p", { style: styles.hint },
+          t("lastUpdate") + ": " + (typeof value.fetchedAt === "number" ? fmtTimeMs(value.fetchedAt) : "—") + staleBadge),
+        React.createElement("p", { style: styles.hint }, t("limitsRef")),
+        React.createElement("button", { style: styles.button, onClick: () => setDiagOpen(!diagOpen) }, diagOpen ? t("diagHide") : t("diagShow")),
+        diagOpen ? React.createElement("div", { style: styles.card },
+          React.createElement("div", { style: styles.row },
+            React.createElement("span", null, t("diagFetchedAt") + ": " + (typeof value.fetchedAt === "number" ? fmtTimeMs(value.fetchedAt) : "—")),
+            React.createElement("span", null, t("diagHttp") + ": " + (typeof value.httpStatus === "number" ? value.httpStatus : "—")),
+            React.createElement("span", null, t("diagParse") + ": v" + (typeof value.parseVersion === "number" ? value.parseVersion : "—")),
+          ),
+          React.createElement("div", { style: styles.row },
+            React.createElement("span", null, t("diagCredSource") + ": " + (cred && cred.source ? cred.source + (cred.keyHint ? " · " + cred.keyHint : "") : "—")),
+          ),
+          React.createElement("p", { style: styles.cardMeta }, t("diagSnapshots")),
+          snapshots.length === 0
+            ? React.createElement("p", { style: styles.hint }, t("diagNone"))
+            : snapshots.map((snapshot, index) => {
+                const label = (typeof snapshot.httpStatus === "number" ? "HTTP " + snapshot.httpStatus : t("diagHttp") + " —")
+                  + (typeof snapshot.attemptAt === "number" ? " · " + fmtTimeMs(snapshot.attemptAt) : "")
+                  + (snapshot.error ? " · " + snapshot.error : "");
+                return React.createElement("details", { key: index },
+                  React.createElement("summary", { style: styles.diagSummary }, label),
+                  React.createElement("pre", { style: styles.pre }, snapshot.body === null || snapshot.body === undefined ? "—" : safeJson(snapshot.body)),
+                );
+              }),
+        ) : null,
         React.createElement("button", { style: styles.button, onClick: load }, t("refresh")),
       );
     }
@@ -515,10 +592,11 @@ window.__ModuleLoader__.load({
 
       return React.createElement("div", { style: styles.wrap },
         React.createElement("p", { style: styles.hint }, t("dshHint")),
-        React.createElement("p", { style: styles.hint }, t("dshScanned").replace("{n}", String(value.scanned ?? 0))),
+        React.createElement("p", { style: styles.hint }, t("dshScanned").replace("{n}", String(value.scanned ?? 0)) + (typeof value.fetchedAt === "number" ? " · " + t("statsAt") + ": " + fmtTimeMs(value.fetchedAt) : "")),
         noReasoningData ? React.createElement("p", { style: styles.hint }, t("dshReasonFolded")) : null,
         chips,
         totalsCard,
+        React.createElement("p", { style: styles.hint }, t("disclaimer")),
         overview,
         React.createElement("h3", { style: styles.cardName }, t("dshSessions")),
         visible.map((session) => {
@@ -571,7 +649,7 @@ window.__ModuleLoader__.load({
       );
     }
 
-    function makePanel(query, getApi, t, locale) {
+    function makePanel(query, getApi, t, locale, timer) {
       function UsagePanel() {
         const [tab, setTab] = React.useState("quota");
         const [state, setState] = React.useState({ kind: "loading" });
@@ -618,21 +696,40 @@ window.__ModuleLoader__.load({
           }
         };
 
-        const load = React.useCallback(() => {
-          setState({ kind: "loading" });
+        // refresh(showLoading): keep the last successful value when a poll
+        // fails and mark it stale instead of wiping it — a network blip must
+        // not look like the quota changed. showLoading=true (manual refresh)
+        // shows the loading state; the 30s interval refreshes silently.
+        const refresh = React.useCallback((showLoading) => {
+          if (showLoading) setState({ kind: "loading" });
           Promise.resolve()
             .then(() => query())
             .then((result) => {
               if (!result || result.ok === false) {
-                setState({ kind: "failure", message: (result && result.error && result.error.message) || "remote failed" });
+                setState((prev) => (prev.kind === "done"
+                  ? { ...prev, stale: true }
+                  : { kind: "failure", message: (result && result.error && result.error.message) || "remote failed" }));
                 return;
               }
-              setState({ kind: "done", value: result.value });
+              setState({ kind: "done", value: result.value, stale: false });
             })
-            .catch((e) => setState({ kind: "failure", message: String((e && e.message) || e) }));
-        }, []);
+            .catch((e) => setState((prev) => (prev.kind === "done"
+              ? { ...prev, stale: true }
+              : { kind: "failure", message: String((e && e.message) || e) })));
+        }, [query]);
 
-        React.useEffect(() => { load(); }, [load]);
+        const load = React.useCallback(() => refresh(true), [refresh]);
+
+        React.useEffect(() => {
+          load();
+          let dispose = null;
+          if (timer && typeof timer.interval === "function") {
+            dispose = timer.interval(() => refresh(false), 30000);
+          }
+          return () => {
+            if (dispose) dispose();
+          };
+        }, [load, refresh]);
 
         const tabButton = (id, label) => React.createElement("button", {
           key: id,
@@ -659,7 +756,7 @@ window.__ModuleLoader__.load({
             React.createElement("button", { style: styles.button, onClick: load }, t("refresh")),
           );
         } else {
-          body = React.createElement(QuotaView, { value: state.value || {}, t, load });
+          body = React.createElement(QuotaView, { value: state.value || {}, t, load, stale: state.stale === true });
         }
 
         return React.createElement("div", { style: styles.wrap },
@@ -688,13 +785,15 @@ window.__ModuleLoader__.load({
               .then((result) => {
                 if (cancelled) return;
                 if (!result || result.ok === false) {
-                  setState({ kind: "failed" });
+                  // Keep the last successful value and mark it stale; only
+                  // fall back to the failed state when nothing good exists yet.
+                  setState((prev) => (prev.kind === "done" ? { ...prev, stale: true } : { kind: "failed" }));
                   return;
                 }
-                setState({ kind: "done", value: result.value });
+                setState({ kind: "done", value: result.value, stale: false });
               })
               .catch(() => {
-                if (!cancelled) setState({ kind: "failed" });
+                if (!cancelled) setState((prev) => (prev.kind === "done" ? { ...prev, stale: true } : { kind: "failed" }));
               });
           };
           run();
@@ -715,6 +814,7 @@ window.__ModuleLoader__.load({
           text = t("dockFailed");
         } else if (state.kind === "done") {
           const value = state.value || {};
+          const stale = state.stale === true;
           if (value.configured === true && value.error === null && value.usage) {
             const u = value.usage;
             const rp = u.rolling && typeof u.rolling.percent === "number" ? u.rolling.percent : null;
@@ -729,6 +829,7 @@ window.__ModuleLoader__.load({
             ];
             const countdown = u.rolling && u.rolling.resetsAt ? fmtCountdown(u.rolling.resetsAt) : "";
             if (countdown) parts.push("↻ " + countdown);
+            if (stale) parts.push(t("stale"));
             text = parts.join(" · ");
             // Localized tooltip keeps the full names behind the compact W/M/↻ row.
             const tipParts = [
@@ -737,6 +838,8 @@ window.__ModuleLoader__.load({
               t("monthly") + " " + (mp === null ? "—" : mp + "%"),
             ];
             if (countdown) tipParts.push(t("dockReset") + " " + countdown);
+            if (stale) tipParts.push(t("stale"));
+            if (typeof value.fetchedAt === "number") tipParts.push(t("lastUpdate") + " " + fmtClock(value.fetchedAt));
             tip = tipParts.join(" · ");
           }
         }
@@ -763,7 +866,7 @@ window.__ModuleLoader__.load({
         return api.usage();
       };
       const timer = ctx.get("timer");
-      const UsagePanel = makePanel(query, getApi, t, ctx.locale);
+      const UsagePanel = makePanel(query, getApi, t, ctx.locale, timer);
       const DockWidget = makeDock(query, t, timer);
 
       ctx.slots.inject("settings.section", () => ctx.slots.register({

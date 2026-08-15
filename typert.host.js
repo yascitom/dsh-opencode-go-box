@@ -27,10 +27,28 @@ const limitsSchema = z.object({
   monthly: z.string(),
 });
 
+const snapshotSchema = z.object({
+  attemptAt: z.number(),
+  httpStatus: z.number().nullable(),
+  parseVersion: z.number(),
+  error: z.string().nullable(),
+  body: z.unknown().nullable(),
+});
+
+const credentialSchema = z.object({
+  source: z.string().nullable(),
+  keyHint: z.string().nullable(),
+});
+
 const usageResultSchema = z.object({
   configured: z.boolean(),
   reason: z.string().nullable(),
   error: z.string().nullable(),
+  fetchedAt: z.number().nullable(),
+  httpStatus: z.number().nullable(),
+  parseVersion: z.number().nullable(),
+  credential: credentialSchema.nullable(),
+  snapshots: z.array(snapshotSchema),
   usage: usageSchema.nullable(),
   thresholds: thresholdsSchema.nullable(),
   limits: limitsSchema.nullable(),
@@ -72,6 +90,7 @@ const dshUsageResultSchema = z.object({
   ok: z.boolean(),
   error: z.string().nullable(),
   message: z.string().nullable(),
+  fetchedAt: z.number().nullable(),
   scanned: z.number(),
   totals: sessionTotalsSchema.nullable(),
   sessions: z.array(sessionUsageSchema),
