@@ -9,7 +9,10 @@ A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) web-GUI pl
 - **Cache stats**: cache read (hit) / cache write shown at the totals, per-session, and per-call levels, plus a **cache hit rate** (cache read as a share of total input);
 - **Model filter**: filter sessions by model (chips) to see each model's usage and cache behavior, plus a **by-model comparison table**;
 - **Bilingual UI**: Chinese / English copy with a **one-click language switch** in the top-right of the panel (drives and persists the Settings → General → Language preference);
-- **Composer dock widget**: a live one-line quota readout under the composer (30s polling) that changes color by threshold.
+- **Composer dock widget**: a live one-line quota readout under the composer (30s polling) that changes color by threshold;
+- **Data freshness**: both the quota page and the dock widget show the **last successful update** time; a failed poll **keeps the last successful data** and marks it **stale** instead of blanking it out;
+- **Diagnostics**: the quota page can expand a **Diagnostics** block — HTTP status, parse version, credential source with a masked key, and the latest 3 request snapshots (raw response bodies), for cross-checking against the official page;
+- **Billing-caveat note**: the DSH details page states that **local stats are for reference only**, since logged tokens can differ from the official bill.
 
 ## Features
 
@@ -21,6 +24,8 @@ A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) web-GUI pl
 - Reasoning tokens: opencode-go is served through DSH's pi-ai adapter, which **folds reasoning into output tokens** and never records `reasoningTokens` — the reasoning column therefore shows **—** (not reported) instead of a misleading 0; adapters that do report a reasoning breakdown (e.g. dsh-llm-deepseek) display real numbers
 - Per-call detail: each model call shows its time, model, and all five token counters; long sessions keep the **latest 400 calls** (totals always cover every call)
 - Composer dock widget (a `conversation.composer.dock` contribution): `🟢 5h 22% · W 13% · M 13% · ↻ 2h13m` (W = weekly, M = monthly, ↻ = reset countdown; hover shows the full labels), colored by the 5-hour rolling window thresholds (default: <60% green / 60–85% orange / ≥85% red)
+- Data freshness: the quota page auto-refreshes every 30s (same cadence as the dock) and shows the **last successful update** time; any failed fetch keeps the previous good data marked **stale**, and only an explicit **Refresh** click shows the loading state
+- Diagnostics: the quota page can expand a **Diagnostics** block — last successful fetch / HTTP status / parse version / credential source with masked key / the latest 3 request snapshots (each with time, status, error, and the raw response body; oversized bodies are truncated to a preview)
 - Precondition check: if opencode-go is missing from **Settings → Models**, or no API key is found, it shows guidance instead of an error
 - API key resolution: the credential reference the opencode-go provider profile declares (`apiKeyEnv`, discovered through the `llm` provider directory), then the conventional `OPENCODE_GO_API_KEY` from the DSH credentials seam, then OpenCode's `auth.json`
 
@@ -102,6 +107,7 @@ model was connected. The endpoint returns:
 - The usage endpoint is undocumented and may change; parsing is defensive, and non-200 responses surface as a friendly status rather than a crash.
 - Quota limits ($12 / $30 / $60) are shown for context only and are not part of the response; they follow the OpenCode Go plan and can drift.
 - DSH session details report token accounting from DSH session logs (no cost amounts) and only cover conversations inside DeepSeek Harness.
+- Local token stats can differ from server-side billing (billing rules, rounding, retries, hidden tokens, etc.); the panel marks them **for reference only** — the official bill is authoritative.
 
 ## License
 
